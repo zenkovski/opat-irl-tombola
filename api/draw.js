@@ -7,9 +7,19 @@
 const L = require("../losovani-core.js");
 const LOSY = require("../losy.json").poradi;
 const { store } = require("../lib/store");
+const crypto = require("crypto");
 const { body, send, adminOk, ip } = require("../lib/util");
 
 const KEY = "draw", IMG = id => "draw:img:" + id;
+// Bez hesla (true) smí losovat, „je tady“ a „skip“ kdokoli s odkazem. Teď vypnuté: Lukáš chce dočasné heslo.
+const BEZ_HESLA = false, VOLNE_AKCE = ["draw", "tady", "pryc"];
+// v31: heslo k losování = env LOS_HESLO (dočasné, jen ve Vercelu a .env). Heslo adminu platí taky.
+function losOk(req) {
+  if (adminOk(req)) return true;
+  const pw = process.env.LOS_HESLO || "", got = String(req.headers["x-admin"] || "");
+  if (!pw || !got) return false;
+  return crypto.timingSafeEqual(crypto.createHash("sha256").update(pw).digest(), crypto.createHash("sha256").update(got).digest());
+}
 const DEMO = ["Freespiny za tisíce Kč", "Stírací los", "Merch", "Alkohol"];
 const empty = () => ({ ver: 0, cfg: { dano: LOSY.length }, prizes: DEMO.map((name, i) => ({ id: "p" + (i + 1), name, short: "", qty: 1, img: 0 })), log: [], resets: [] });
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -79,15 +89,16 @@ module.exports = async (req, res) => {
       res.setHeader("Cache-Control", "public, max-age=0, s-maxage=2"); // CDN drží 2 s → diváci nežerou databázi
       res.setHeader("Content-Type", "application/json; charset=utf-8");
       res.statusCode = 200;
-      return res.end(JSON.stringify({ ...st, celkem: LOSY.length, now: Date.now() }));
+      return res.end(JSON.stringify({ ...st, celkem: LOSY.length, volne: BEZ_HESLA, now: Date.now() }));
     }
     if (req.method !== "POST") return send(res, 405, { error: "?" });
 
-    const k = "adm:" + ip(req);
-    if ((await store.hits(k)) >= 20) return send(res, 429, { error: "Moc špatných pokusů. Zkus to za 15 minut." });
-    if (!adminOk(req)) { await store.hit(k, 900); return send(res, 401, { error: "Špatné heslo." }); }
-
     const b = await body(req);
+    if (!(BEZ_HESLA && VOLNE_AKCE.includes(b.action))) {
+      const k = "adm:" + ip(req);
+      if ((await store.hits(k)) >= 20) return send(res, 429, { error: "Moc špatných pokusů. Zkus to za 15 minut." });
+      if (!losOk(req)) { await store.hit(k, 900); return send(res, 401, { error: "Špatné heslo." }); }
+    }
     if (b.action === "check") return send(res, 200, { ok: true });
     if (!(await store.lock(KEY, 25))) return send(res, 409, { error: "Právě se losuje. Chvilku." });
     try {
@@ -101,7 +112,7 @@ module.exports = async (req, res) => {
           await tady(st, e);
         }
         await save(st);
-        return send(res, 200, { ok: true, entry: e, state: { ...st, celkem: LOSY.length } });
+        return send(res, 200, { ok: true, entry: e, state: { ...st, celkem: LOSY.length, volne: BEZ_HESLA } });
       }
       if (b.action === "pryc") {
         const e = st.log.find(x => x.no === Number(b.no));
@@ -131,7 +142,7 @@ module.exports = async (req, res) => {
         st.log = []; st.resets.push(Date.now());
       } else return send(res, 400, { error: "Neznámá akce." });
       await save(st);
-      return send(res, 200, { ok: true, state: { ...st, celkem: LOSY.length } });
+      return send(res, 200, { ok: true, state: { ...st, celkem: LOSY.length, volne: BEZ_HESLA } });
     } finally { await store.unlock(KEY); }
   } catch (e) {
     console.error(e);
