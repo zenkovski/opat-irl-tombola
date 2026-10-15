@@ -1,18 +1,20 @@
 // Losování tomboly. STEJNÝ soubor běží na serveru (api/draw.js) i v prohlížeči (tlačítko Ověřit).
 //
-// Jak se vybere číslo:
+// Losy: 300 lístků s trojmístnými čísly (100–999) v pevném pořadí (losy.json, zveřejněné předem).
+// Rozdávají se ze stohu shora; ve hře je prvních N rozdaných.
+//
+// Jak se losuje:
 //  1. Náhodu nedáváme my. Bereme ji z drand (https://drand.love): veřejný zdroj náhody,
 //     který každé 3 s vydá nové číslo. Provozuje ho League of Entropy (Cloudflare, EPFL, Protocol Labs a další).
 //     Dopředu ho nezná nikdo, ani my.
-//  2. Po stisku LOSUJ se použije kolo drand, které vyjde až za pár sekund (kolo = poslední + 2).
-//     Na „dobré“ číslo se tedy čekat nedá.
-//  3. Ve hře jsou losy od..do bez těch, co už padly (seřazené vzestupně).
-//  4. hash = SHA-256( randomness + ":" + pořadí losování )
-//     pozice = hash (jako velké číslo) modulo počet losů ve hře
-//     výherce = losy_ve_hře[pozice]
-//  5. Cenu vybere kolo štěstí ze stejné náhody. Každý kus ceny = jeden dílek kola:
-//     dílek = SHA-256( randomness + ":cena:" + pořadí ) modulo počet kusů, které ještě zbývají.
-//     Cena, které je víc kusů, má na kole víc místa (a víc šance).
+//  2. Vždy se použije kolo drand, které vyjde až po stisku tlačítka (poslední + 2). Na „dobré“ číslo se čekat nedá.
+//  3. HRACÍ AUTOMAT = číslo losu:
+//     ve hře = rozdané losy bez těch, co už padly (seřazené vzestupně)
+//     los = ve_hře[ SHA-256(náhoda + ":" + pořadí) mod počet ]
+//  4. Majitel losu se do 30 s přihlásí („je tady“), jinak se los přeskočí.
+//  5. KOLO ŠTĚSTÍ = cena, až po „je tady“, z NOVÉHO kola drand:
+//     všechna pole kola jsou stejně velká (jeden druh ceny = jedno pole, dokud nějaký kus zbývá)
+//     cena = pole[ SHA-256(náhoda + ":cena:" + pořadí) mod počet polí ]
 (function (root) {
   const CHAIN = "52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971"; // drand quicknet (kolo každé 3 s)
   const GENESIS = 1692803367, PERIOD = 3;
@@ -24,11 +26,10 @@
     return [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, "0")).join("");
   }
 
-  // losy ve hře: od..do bez už vylosovaných
-  function pool(from, to, taken) {
-    const t = new Set(taken), p = [];
-    for (let i = from; i <= to; i++) if (!t.has(i)) p.push(i);
-    return p;
+  // losy ve hře: prvních `dano` ze stohu bez už vylosovaných, vzestupně
+  function pool(poradi, dano, taken) {
+    const t = new Set(taken);
+    return poradi.slice(0, dano).filter(n => !t.has(n)).sort((a, b) => a - b);
   }
 
   async function pick(randomness, no, p) {
@@ -37,18 +38,18 @@
     return { hash, index, number: p[index] };
   }
 
-  // kolik kusů každé ceny zbývá (výhra losu, který se nehlásí, se vrací do hry)
+  // kolik kusů každé ceny zbývá (cenu dostane jen los, který „je tady“)
   function prizesLeft(prizes, log) {
-    return prizes.map(p => ({ id: p.id, name: p.name, left: Math.max(0, p.qty - log.filter(e => e.prizeId === p.id && !e.absent).length) }));
+    return prizes.map(p => ({ id: p.id, name: p.name, short: p.short || "", left: Math.max(0, p.qty - log.filter(e => e.prizeId === p.id).length) }));
   }
 
-  async function pickPrize(randomness, no, pp) {
-    const total = pp.reduce((s, p) => s + p.left, 0);
-    if (!total) return null;
-    const hash = await sha256hex(randomness + ":cena:" + no);
-    const r = Number(BigInt("0x" + hash) % BigInt(total));
-    let acc = 0;
-    for (const p of pp) { if (r < acc + p.left) return { hash, r, total, id: p.id, name: p.name }; acc += p.left; }
+  // pole kola = druhy cen, kterých ještě něco zbývá; všechna stejně velká
+  async function pickPrize(randomness, no, pole) {
+    if (!pole.length) return null;
+    const hash = await sha256hex(randomness + ":cena:" + no), h = BigInt("0x" + hash), n = BigInt(pole.length);
+    const index = Number(h % n);
+    const kde = Number((h / n) % 1000n) / 1000; // kde v poli se kolo zastaví (jen vzhled)
+    return { hash, index, kde, id: pole[index].id, name: pole[index].name };
   }
 
   // jedno kolo drand; round = číslo nebo "latest"; zkouší víc nezávislých serverů
@@ -65,16 +66,18 @@
   }
 
   // přepočítá celý seznam od začátku; vrací pro každé losování { ok, why }
-  async function verify(log, relays) {
+  async function verify(log, poradi, relays) {
     const out = [], taken = [];
     for (const e of log) {
       const b = await beacon(e.round, relays);
-      const p = pool(e.from, e.to, taken);
-      const k = b ? await pick(b.randomness, e.no, p) : null;
-      const c = b && e.prizePool ? await pickPrize(b.randomness, e.no, e.prizePool) : null;
-      const cenaOk = !e.prizePool || (c ? c.id === e.prizeId : !e.prizeId);
-      const ok = !!b && b.randomness === e.randomness && k.number === e.number && cenaOk;
-      out.push({ no: e.no, ok, why: !b ? "drand neodpověděl" : b.randomness !== e.randomness ? "jiná náhoda než u drand" : k.number !== e.number ? "jiné číslo losu" : !cenaOk ? "jiná cena" : "" });
+      const k = b ? await pick(b.randomness, e.no, pool(poradi, e.dano, taken)) : null;
+      let why = !b ? "drand neodpověděl" : b.randomness !== e.randomness ? "jiná náhoda než u drand" : k.number !== e.number ? "jiné číslo losu" : "";
+      if (!why && e.prizeRound) {
+        const b2 = await beacon(e.prizeRound, relays);
+        const c = b2 ? await pickPrize(b2.randomness, e.no, e.prizePool) : null;
+        why = !b2 ? "drand neodpověděl (cena)" : b2.randomness !== e.prizeRandomness ? "jiná náhoda u ceny" : !c || c.id !== e.prizeId ? "jiná cena" : "";
+      }
+      out.push({ no: e.no, ok: !why, why });
       taken.push(e.number);
     }
     return out;
