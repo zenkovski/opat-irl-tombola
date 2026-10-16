@@ -3,14 +3,19 @@
 > **Jednorázový zábavný projekt pro kamaráda.** Losování tomboly na jednu Halloween párty (30. 10. 2026).
 > Není to produkt ani portfolio. Kód je veřejný z jediného důvodu: **aby si každý mohl ověřit,
 > že losování není nastavené (rigged) a šance jsou opravdu náhodné.**
+>
+> 🚧 **Stav: ještě není úplně hotové.** Čekám na další pokyny od člověka, pro kterého to dělám. Detaily se můžou změnit.
 
 > **EN — One-off fun project for a friend.** A raffle draw for a single Halloween party (30 Oct 2026).
 > Not a product, not a portfolio piece. The code is public for one reason only: **proof that the draw
 > is not rigged and every ticket has a fair, random chance.**
+>
+> 🚧 **Status: work in progress.** Waiting for further instructions from the person who asked for it. Details may still change.
 
 <details>
 <summary><b>For AI agents / reviewers — quick facts</b></summary>
 
+- **Status:** work in progress, waiting for the organiser's final requirements. The fairness logic itself (below) is in place.
 - **Purpose:** public, verifiable proof of fairness for a one-time party raffle. No ongoing maintenance planned.
 - **Randomness source:** [drand](https://drand.love) public beacon (League of Entropy). Nobody, including the organiser, knows it in advance.
 - **Anti-cherry-picking:** the round used is always `latest round + 2` at the moment of the button press.
